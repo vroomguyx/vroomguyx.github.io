@@ -343,9 +343,17 @@
   }
   #load-more-btn:hover{border-color:var(--heat);color:var(--heat);}
   #undo-btn{
-    margin-top:0;
-    font-size:11px;
+    background:var(--bg-card);
+    border:1.5px solid var(--radar);
+    color:var(--radar);
+    font-size:12px;
+    padding:9px 18px;
+    border-radius:8px;
+    letter-spacing:1px;
+    transition:all .15s ease;
   }
+  #undo-btn:hover{background:var(--radar-dim);color:var(--text);}
+  #undo-btn:active{transform:scale(0.97);}
 
   /* Route Math — calculated minimum Chase Bounty targets, per scenario */
   .scenario-panel{
@@ -523,7 +531,7 @@
     <div class="boss-list" id="boss-list"></div>
     <div class="load-more-wrap">
       <button id="load-more-btn">▼ Show Next 2 Rivals</button>
-      <button class="text-link" id="undo-btn" style="display:none;">↺ undo last reveal</button>
+      <button id="undo-btn" style="display:none;">↺ Undo Last Reveal</button>
     </div>
     <div class="done-msg" id="done-msg" style="display:none;">— Top of the Blacklist reached —</div>
   </div>
