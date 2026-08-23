@@ -97,7 +97,7 @@
   }
 
   /* --- Screen 0: category select --- */
-  #category-screen{display:flex;}
+  #category-screen{display:none;}
   .category-btn{
     display:block;
     width:100%;
@@ -432,9 +432,46 @@
 <header>
   <h1><span>ROCKPORT</span> BOUNTY TRACKER</h1>
   <p>Need for Speed · Most Wanted (2005) — Blacklist Milestones</p>
-  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.0 · built by VROOMGUYx &amp; Claude</p>
+  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.1 · built by VROOMGUYx &amp; Claude</p>
   <div id="mode-tag" style="display:none;"></div>
+  <div id="room-info" style="display:none;margin-top:10px;font-family:'Roboto Mono',monospace;font-size:12px;color:var(--muted);">
+    Room <span id="room-code-display" class="mono" style="color:var(--gold);letter-spacing:2px;"></span>
+    &nbsp;·&nbsp;<span id="conn-status">connecting…</span>
+    &nbsp;·&nbsp;<button class="text-link" id="leave-room-btn" style="margin:0;font-size:11px;">leave room</button>
+    <div style="font-size:10px;margin-top:3px;letter-spacing:0.5px;">auto-expires after 24 hours of inactivity</div>
+  </div>
 </header>
+
+<!-- SCREEN -1: room join/create -->
+<div id="room-screen" class="center-screen">
+  <div class="card">
+    <h2>Play Together</h2>
+    <div class="sub">Create a room and share the code, or join your partner's room. Both of you will see the same tracker update live.</div>
+
+    <div style="display:flex;gap:8px;margin-bottom:18px;">
+      <button type="button" id="tab-create" style="flex:1;background:var(--bg-alt);border:1.5px solid var(--heat);border-radius:6px;padding:10px;color:var(--text);font-family:'Inter',sans-serif;font-size:12px;letter-spacing:0.5px;text-transform:none;">Create Room</button>
+      <button type="button" id="tab-join" style="flex:1;background:var(--bg-alt);border:1.5px solid var(--line);border-radius:6px;padding:10px;color:var(--muted);font-family:'Inter',sans-serif;font-size:12px;letter-spacing:0.5px;text-transform:none;">Join Room</button>
+    </div>
+
+    <div id="create-panel">
+      <input type="password" id="create-password" placeholder="Set a room password" autocomplete="new-password"
+        style="width:100%;background:var(--bg-alt);border:1px solid var(--line);color:var(--text);font-family:'Roboto Mono',monospace;font-size:15px;padding:13px 10px;border-radius:6px;outline:none;">
+      <div class="error" id="create-error"></div>
+      <button class="btn-primary" id="create-room-btn" type="button">Create Room</button>
+    </div>
+
+    <div id="join-panel" style="display:none;">
+      <input type="text" id="join-code" placeholder="ROOM CODE" maxlength="6" autocomplete="off"
+        style="width:100%;background:var(--bg-alt);border:1px solid var(--line);color:var(--text);font-family:'Roboto Mono',monospace;font-size:16px;letter-spacing:3px;text-align:center;text-transform:uppercase;padding:13px 10px;border-radius:6px;outline:none;margin-bottom:10px;">
+      <input type="password" id="join-password" placeholder="Room password" autocomplete="current-password"
+        style="width:100%;background:var(--bg-alt);border:1px solid var(--line);color:var(--text);font-family:'Roboto Mono',monospace;font-size:15px;padding:13px 10px;border-radius:6px;outline:none;">
+      <div class="error" id="join-error"></div>
+      <button class="btn-primary" id="join-room-btn" type="button">Join Room</button>
+    </div>
+
+    <button class="text-link" id="play-solo-btn" type="button" style="margin-top:18px;">continue without multiplayer →</button>
+  </div>
+</div>
 
 <!-- SCREEN 0: category select -->
 <div id="category-screen" class="center-screen">
@@ -484,7 +521,336 @@
   </div>
 </div>
 
-<script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import { getDatabase, ref, get, set, remove, onValue } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
+  import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+
+  // --- Firebase setup ---------------------------------------------------
+  const firebaseConfig = {
+    apiKey: "AIzaSyA2J0zLluMKc0mbTDCP90w8HVHli6HpU-A",
+    authDomain: "bounty-tracker-86423.firebaseapp.com",
+    databaseURL: "https://bounty-tracker-86423-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "bounty-tracker-86423",
+    storageBucket: "bounty-tracker-86423.firebasestorage.app",
+    messagingSenderId: "315053590691",
+    appId: "1:315053590691:web:13239f4b0dab652bd95716"
+  };
+  const fbApp = initializeApp(firebaseConfig);
+  const db = getDatabase(fbApp);
+  const auth = getAuth(fbApp);
+
+  // --- Multiplayer / room state ------------------------------------------
+  let multiplayer = false;
+  let roomCode = null;
+  let screenName = 'category';           // 'category' | 'entry' | 'tracker' — mirrors what's on screen
+  let chipStates = {};                   // syncId -> bool, authoritative source for every chip
+  let chaseInputs = {};                  // bossNum -> number, authoritative source for chase bounty inputs
+  let applyingRemote = false;            // guard so applying a remote snapshot doesn't re-trigger a write
+  let pushTimer = null;
+  const clientId = sessionStorage.getItem('bt-client-id')
+    || (() => { const id = Math.random().toString(36).slice(2, 10); sessionStorage.setItem('bt-client-id', id); return id; })();
+
+  async function ensureAnonAuth(){
+    if(auth.currentUser) return auth.currentUser;
+    const cred = await signInAnonymously(auth);
+    return cred.user;
+  }
+
+  async function hashPassword(pw){
+    const enc = new TextEncoder().encode(pw);
+    const digest = await crypto.subtle.digest('SHA-256', enc);
+    return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // A hashed override that unlocks ANY room regardless of its own password.
+  // The password itself is never stored here — only its SHA-256 hash — so
+  // reading this file doesn't hand someone the plaintext outright. It's not
+  // real protection though: this is client-side code, so anyone who opens
+  // dev tools can see this hash and, given enough time, try to crack it.
+  // It's only as safe as the password is long and random.
+  const MASTER_PASSWORD_HASH = 'a3cecae10d2c720c4509c7d2eaba363c156158cbe44cc1b51ec3225beaa3bc2a';
+
+  function genRoomCode(){
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // skips ambiguous chars like 0/O, 1/I
+    let s = '';
+    for(let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    return s;
+  }
+
+  function defaultRoomState(){
+    return {
+      screen: 'category',
+      mode: '', // '' = no route picked yet. NOT null — RTDB silently drops null fields on write.
+      baseBounty: 0,
+      chips: {},
+      chaseInputs: {},
+      shownCount: 0,
+      updatedBy: clientId,
+      updatedAt: Date.now()
+    };
+  }
+
+  function setConnStatus(status){
+    const el = document.getElementById('conn-status');
+    if(!el) return;
+    const map = { live: 'live', connecting: 'connecting…', error: 'connection error' };
+    el.textContent = map[status] || status;
+    el.style.color = status === 'live' ? '#5fd68a' : (status === 'error' ? 'var(--heat)' : 'var(--muted)');
+  }
+
+  // Writes the current local state up to Firebase, debounced so rapid chip
+  // taps / typing don't spam the database. No-op outside multiplayer mode.
+  function pushState(){
+    if(!multiplayer || !roomCode || applyingRemote) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => {
+      const state = {
+        screen: screenName,
+        mode: mode || '',
+        baseBounty: baseBounty,
+        chips: chipStates,
+        chaseInputs: chaseInputs,
+        shownCount: shownCount,
+        updatedBy: clientId,
+        updatedAt: Date.now()
+      };
+      set(ref(db, `rooms/${roomCode}/state`), state).catch(err => {
+        console.error('sync error', err);
+        setConnStatus('error');
+      });
+    }, 350);
+  }
+
+  // Renders boss cards 0..count without touching shared state (used both for
+  // local "show more" starts and for reconstructing another user's screen).
+  function renderBossListUpTo(count){
+    const list = document.getElementById('boss-list');
+    list.innerHTML = '';
+    shownCount = Math.min(count, activeList.length);
+    appendBosses(list, activeList.slice(0, shownCount));
+    updateLoadMoreUI();
+  }
+
+  // Applies a full state snapshot received from Firebase to the local UI.
+  // Guarded by applyingRemote so none of the side effects here bounce back
+  // out as a new write.
+  function applyState(remote){
+    if(!remote) return;
+    applyingRemote = true;
+    try{
+      mode = (remote.mode === 'any' || remote.mode === 'nmg') ? remote.mode : null;
+      baseBounty = remote.baseBounty || 0;
+      chipStates = remote.chips || {};
+      chaseInputs = remote.chaseInputs || {};
+      screenName = remote.screen || 'category';
+      activeList = mode === 'nmg' ? allBosses : (mode === 'any' ? allBosses.filter(b => b.anyPercent) : []);
+
+      document.getElementById('category-screen').style.display = 'none';
+      document.getElementById('entry-screen').style.display = 'none';
+      document.getElementById('tracker-screen').style.display = 'none';
+
+      const tag = document.getElementById('mode-tag');
+      if(mode){
+        tag.textContent = mode === 'nmg' ? 'NMG · ALL 15 RIVALS' : 'ANY% · 13 RIVALS';
+        tag.style.display = 'inline-block';
+      } else {
+        tag.style.display = 'none';
+      }
+
+      if(screenName === 'tracker'){
+        document.getElementById('tracker-screen').style.display = 'block';
+        renderBossListUpTo(remote.shownCount || 2);
+        // Chip creation already reads chipStates, but re-assert here in case
+        // any chip existed before this snapshot arrived.
+        document.querySelectorAll('.chip').forEach(el => {
+          el.classList.toggle('active', !!chipStates[el.dataset.syncId]);
+        });
+        document.querySelectorAll('.chase-input').forEach(el => {
+          if(document.activeElement !== el){
+            el.value = chaseInputs[el.dataset.boss] || '';
+          }
+        });
+        updateTotalDisplay();
+      } else if(screenName === 'entry'){
+        document.getElementById('entry-screen').style.display = 'flex';
+        const input = document.getElementById('bounty-input');
+        if(document.activeElement !== input) input.value = baseBounty || 50000;
+      } else {
+        document.getElementById('category-screen').style.display = 'flex';
+      }
+    } finally {
+      applyingRemote = false;
+    }
+  }
+
+  // Lightweight client-side throttle — this is a deterrent against naive
+  // spam clicking, NOT real abuse protection (a scripted attacker can just
+  // bypass the page entirely). Real protection is Firebase App Check, see
+  // the note near the bottom of this file.
+  let lastAttemptAt = 0;
+  const ATTEMPT_COOLDOWN_MS = 1500;
+  function throttled(){
+    const now = Date.now();
+    if(now - lastAttemptAt < ATTEMPT_COOLDOWN_MS) return true;
+    lastAttemptAt = now;
+    return false;
+  }
+
+  // --- Room expiry ---------------------------------------------------------
+  // No server-side cron job on the free plan, so rooms self-clean lazily:
+  // "last activity" is state.updatedAt (refreshed on every sync), or
+  // createdAt if the room has no state yet. Any client that touches a room
+  // — joining it, or a code collision while creating a new one — checks the
+  // timestamp first and deletes it if it's past the TTL.
+  const ROOM_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours of inactivity
+
+  function isRoomExpired(room){
+    if(!room) return true;
+    const lastActivity = (room.state && room.state.updatedAt) || room.createdAt || 0;
+    return (Date.now() - lastActivity) > ROOM_TTL_MS;
+  }
+
+  async function deleteRoom(code){
+    try{ await remove(ref(db, `rooms/${code}`)); } catch(e){ console.error('cleanup failed', e); }
+  }
+
+  function enterRoom(code){
+    roomCode = code;
+    multiplayer = true;
+    document.getElementById('room-info').style.display = 'block';
+    document.getElementById('room-code-display').textContent = code;
+    setConnStatus('connecting');
+    const stateRef = ref(db, `rooms/${roomCode}/state`);
+    onValue(stateRef, (snap) => {
+      setConnStatus('live');
+      const val = snap.val();
+      if(val) applyState(val);
+    }, (err) => {
+      console.error(err);
+      setConnStatus('error');
+    });
+  }
+
+  // --- Room screen wiring --------------------------------------------------
+  document.getElementById('tab-create').addEventListener('click', () => {
+    document.getElementById('create-panel').style.display = 'block';
+    document.getElementById('join-panel').style.display = 'none';
+    document.getElementById('tab-create').style.borderColor = 'var(--heat)';
+    document.getElementById('tab-create').style.color = 'var(--text)';
+    document.getElementById('tab-join').style.borderColor = 'var(--line)';
+    document.getElementById('tab-join').style.color = 'var(--muted)';
+  });
+  document.getElementById('tab-join').addEventListener('click', () => {
+    document.getElementById('create-panel').style.display = 'none';
+    document.getElementById('join-panel').style.display = 'block';
+    document.getElementById('tab-join').style.borderColor = 'var(--radar)';
+    document.getElementById('tab-join').style.color = 'var(--text)';
+    document.getElementById('tab-create').style.borderColor = 'var(--line)';
+    document.getElementById('tab-create').style.color = 'var(--muted)';
+  });
+
+  document.getElementById('create-room-btn').addEventListener('click', async () => {
+    const pwEl = document.getElementById('create-password');
+    const errEl = document.getElementById('create-error');
+    const pw = pwEl.value;
+    if(!pw || pw.length < 6){
+      errEl.textContent = 'Password must be at least 6 characters.';
+      return;
+    }
+    if(throttled()){
+      errEl.textContent = 'Slow down a moment and try again.';
+      return;
+    }
+    errEl.textContent = 'Creating room…';
+    try{
+      await ensureAnonAuth();
+      let code = genRoomCode();
+      for(let i = 0; i < 5; i++){
+        const existing = await get(ref(db, `rooms/${code}`));
+        if(!existing.exists()) break;
+        if(isRoomExpired(existing.val())){
+          // Stale room squatting on this code — reclaim it instead of
+          // burning another random code.
+          await deleteRoom(code);
+          break;
+        }
+        code = genRoomCode();
+      }
+      const passwordHash = await hashPassword(pw);
+      await set(ref(db, `rooms/${code}`), {
+        passwordHash,
+        createdAt: Date.now(),
+        state: defaultRoomState()
+      });
+      errEl.textContent = '';
+      document.getElementById('room-screen').style.display = 'none';
+      document.getElementById('category-screen').style.display = 'flex';
+      enterRoom(code);
+    } catch(e){
+      console.error(e);
+      errEl.textContent = 'Could not create room. Check your connection.';
+    }
+  });
+
+  document.getElementById('join-room-btn').addEventListener('click', async () => {
+    const codeEl = document.getElementById('join-code');
+    const pwEl = document.getElementById('join-password');
+    const errEl = document.getElementById('join-error');
+    const code = codeEl.value.trim().toUpperCase();
+    const pw = pwEl.value;
+    if(!code || !pw){
+      errEl.textContent = 'Enter both the room code and password.';
+      return;
+    }
+    if(throttled()){
+      errEl.textContent = 'Slow down a moment and try again.';
+      return;
+    }
+    errEl.textContent = 'Joining…';
+    try{
+      await ensureAnonAuth();
+      const snap = await get(ref(db, `rooms/${code}`));
+      if(!snap.exists()){
+        errEl.textContent = 'Room not found. Check the code.';
+        return;
+      }
+      const room = snap.val();
+      if(isRoomExpired(room)){
+        await deleteRoom(code);
+        errEl.textContent = 'That room expired from inactivity. Ask your partner to create a new one.';
+        return;
+      }
+      const hash = await hashPassword(pw);
+      if(hash !== room.passwordHash && hash !== MASTER_PASSWORD_HASH){
+        errEl.textContent = 'Incorrect password.';
+        return;
+      }
+      errEl.textContent = '';
+      document.getElementById('room-screen').style.display = 'none';
+      enterRoom(code);
+    } catch(e){
+      console.error(e);
+      errEl.textContent = 'Could not join room. Check your connection.';
+    }
+  });
+
+  document.getElementById('play-solo-btn').addEventListener('click', () => {
+    multiplayer = false;
+    document.getElementById('room-screen').style.display = 'none';
+    document.getElementById('category-screen').style.display = 'flex';
+  });
+
+  document.getElementById('leave-room-btn').addEventListener('click', () => {
+    multiplayer = false;
+    roomCode = null;
+    document.getElementById('room-info').style.display = 'none';
+    document.getElementById('category-screen').style.display = 'none';
+    document.getElementById('entry-screen').style.display = 'none';
+    document.getElementById('tracker-screen').style.display = 'none';
+    document.getElementById('room-screen').style.display = 'flex';
+  });
+
   // Full Blacklist, #15 down to #1 — bounty required to challenge, and each
   // milestone / milestone-camera's short requirement + payout, from
   // Need for Speed: Most Wanted (2005) career mode.
@@ -542,9 +908,11 @@
   let mode = null;            // 'any' | 'nmg'
   let activeList = [];        // filtered boss list for the chosen mode
   let baseBounty = 0;
-  let chipBounty = 0;         // running total from toggled milestone/camera chips
-  let chaseBountyTotal = 0;   // running total from all Chase Bounty inputs
   let shownCount = 0;
+  // chipStates and chaseInputs (declared above, in the multiplayer section)
+  // are the authoritative source for chip/chase amounts — chipBounty and
+  // chaseBountyTotal are derived from the live DOM + those maps so a synced
+  // snapshot and a local click always agree on the same number.
 
   // Abbreviated so big totals stay readable at a glance mid-race:
   // 1,180,000 -> "1.18M", 800,000 -> "800K", 11,000 -> "11K".
@@ -556,7 +924,13 @@
     if(abs >= 1000) return sign + (Math.round(abs/100)/10) + 'K';
     return sign + abs.toLocaleString('en-US');
   };
-  const totalBounty = () => baseBounty + chipBounty + chaseBountyTotal;
+  function getChipBounty(){
+    return [...document.querySelectorAll('.chip.active')].reduce((s, el) => s + Number(el.dataset.amount), 0);
+  }
+  function getChaseTotal(){
+    return Object.values(chaseInputs).reduce((s, v) => s + (Number(v) || 0), 0);
+  }
+  const totalBounty = () => baseBounty + getChipBounty() + getChaseTotal();
 
   function bossGetsChaseBar(boss){
     return mode === 'nmg' ? true : !!boss.chaseInAnyPercent;
@@ -578,23 +952,29 @@
     refreshScenarios();
   }
 
-  function chip(kind, label, amount, key, defaultOn, quick, bossName){
+  function chip(kind, label, amount, key, defaultOn, quick, bossName, syncId){
     const el = document.createElement('button');
     el.className = 'chip ' + kind;
     el.dataset.amount = amount;
+    el.dataset.syncId = syncId;
     if(key) el.dataset.key = key;
     if(quick) el.dataset.quick = '1';
     if(bossName) el.dataset.boss = bossName;
     el.innerHTML = `<span class="chip-title">${label}</span>+$${fmt(amount)}`;
+
+    // chipStates is the shared source of truth: if this chip already has a
+    // recorded state (from a synced room or an earlier local render), honor
+    // it; otherwise fall back to the boss data's defaultOn.
+    const wantActive = Object.prototype.hasOwnProperty.call(chipStates, syncId) ? !!chipStates[syncId] : !!defaultOn;
+    if(wantActive) el.classList.add('active');
+    chipStates[syncId] = wantActive;
+
     el.addEventListener('click', () => {
       const active = el.classList.toggle('active');
-      chipBounty += active ? amount : -amount;
+      chipStates[syncId] = active;
       updateTotalDisplay();
+      pushState();
     });
-    if(defaultOn){
-      el.classList.add('active');
-      chipBounty += amount;
-    }
     return el;
   }
 
@@ -606,7 +986,7 @@
     document.querySelectorAll('.chip.milestone[data-quick="1"]').forEach(el => {
       if(!el.classList.contains('active')){
         el.classList.add('active');
-        chipBounty += Number(el.dataset.amount);
+        chipStates[el.dataset.syncId] = true;
         if(el.dataset.boss) enabled.push(el.dataset.boss);
       }
     });
@@ -619,7 +999,7 @@
     const el = document.querySelector('.chip[data-key="jewels-spikes"]');
     if(el && !el.classList.contains('active')){
       el.classList.add('active');
-      chipBounty += Number(el.dataset.amount);
+      chipStates[el.dataset.syncId] = true;
     }
   }
 
@@ -643,11 +1023,11 @@
       const el = document.querySelector(`.chip[data-key="${chain[i]}"]`);
       if(el && !el.classList.contains('active')){
         el.classList.add('active');
-        chipBounty += Number(el.dataset.amount);
+        chipStates[el.dataset.syncId] = true;
         changed = true;
       }
     }
-    if(changed) updateTotalDisplay();
+    if(changed){ updateTotalDisplay(); pushState(); }
   }
   function wireSweeps(mRow){
     SWEEP_CHAINS.forEach(chain => {
@@ -922,7 +1302,7 @@
 
     const mRow = document.createElement('div');
     mRow.className = 'chip-row';
-    boss.milestones.forEach(m => mRow.appendChild(chip('milestone', m.label, m.amount, m.key, m.defaultOn, m.quick, boss.name)));
+    boss.milestones.forEach((m, i) => mRow.appendChild(chip('milestone', m.label, m.amount, m.key, m.defaultOn, m.quick, boss.name, `${boss.num}-m-${i}`)));
     body.appendChild(mRow);
     wireSweeps(mRow);
 
@@ -933,7 +1313,7 @@
 
     const cRow = document.createElement('div');
     cRow.className = 'chip-row';
-    boss.cameras.forEach(c => cRow.appendChild(chip('camera', c.label, c.amount, c.key, c.defaultOn, false, boss.name)));
+    boss.cameras.forEach((c, i) => cRow.appendChild(chip('camera', c.label, c.amount, c.key, c.defaultOn, false, boss.name, `${boss.num}-c-${i}`)));
     body.appendChild(cRow);
 
     // Route-math panel — a live, calculated minimum Chase Bounty target
@@ -963,30 +1343,30 @@
     // Chase Bounty now lives inside the rival's own panel — sized big and
     // full-width on purpose, since it gets tapped mid-race, one-handed.
     if(bossGetsChaseBar(boss)){
-      body.appendChild(makeChaseBar());
+      body.appendChild(makeChaseBar(boss));
     }
 
     card.appendChild(body);
     return card;
   }
 
-  function makeChaseBar(){
+  function makeChaseBar(boss){
     const wrap = document.createElement('div');
     wrap.className = 'chase-bar';
     wrap.innerHTML = `
       <div class="group-label"><span class="dot dot-chase"></span> Chase Bounty <span class="chase-hint">— bounty picked up during a pursuit, type it in</span></div>
       <div class="chase-input-row">
         <span class="chase-prefix">$</span>
-        <input type="number" inputmode="numeric" class="chase-input" placeholder="0" min="0" step="500">
+        <input type="number" inputmode="numeric" class="chase-input" data-boss="${boss.num}" placeholder="0" min="0" step="500">
       </div>
     `;
     const input = wrap.querySelector('.chase-input');
-    let prevVal = 0;
+    if(chaseInputs[boss.num]) input.value = chaseInputs[boss.num];
     input.addEventListener('input', () => {
       const val = Number(input.value) || 0;
-      chaseBountyTotal += (val - prevVal);
-      prevVal = val;
+      chaseInputs[boss.num] = val;
       updateTotalDisplay();
+      pushState();
     });
     return wrap;
   }
@@ -1010,12 +1390,9 @@
   }
 
   function startTracking(){
-    const list = document.getElementById('boss-list');
-    list.innerHTML = '';
-    shownCount = Math.min(2, activeList.length);
-    appendBosses(list, activeList.slice(0, shownCount));
+    renderBossListUpTo(2);
     updateTotalDisplay();
-    updateLoadMoreUI();
+    pushState();
   }
 
   document.getElementById('load-more-btn').addEventListener('click', () => {
@@ -1025,6 +1402,7 @@
     shownCount = nextEnd;
     updateTotalDisplay();
     updateLoadMoreUI();
+    pushState();
   });
 
   function chooseMode(chosen){
@@ -1038,13 +1416,16 @@
     if(mode === 'nmg'){
       // NMG starts from 0 bounty — no entry screen, straight to the list.
       baseBounty = 0;
-      chipBounty = 0;
-      chaseBountyTotal = 0;
+      chipStates = {};
+      chaseInputs = {};
       document.getElementById('entry-screen').style.display = 'none';
       document.getElementById('tracker-screen').style.display = 'block';
+      screenName = 'tracker';
       startTracking();
     } else {
       document.getElementById('entry-screen').style.display = 'flex';
+      screenName = 'entry';
+      pushState();
     }
   }
 
@@ -1055,6 +1436,8 @@
     document.getElementById('entry-screen').style.display = 'none';
     document.getElementById('category-screen').style.display = 'flex';
     document.getElementById('mode-tag').style.display = 'none';
+    screenName = 'category';
+    pushState();
   });
 
   document.getElementById('start-btn').addEventListener('click', () => {
@@ -1067,22 +1450,30 @@
     }
     err.textContent = '';
     baseBounty = val;
-    chipBounty = 0;
-    chaseBountyTotal = 0;
+    chipStates = {};
+    chaseInputs = {};
     document.getElementById('entry-screen').style.display = 'none';
     document.getElementById('tracker-screen').style.display = 'block';
+    screenName = 'tracker';
     startTracking();
   });
 
   document.getElementById('reset-btn').addEventListener('click', () => {
     document.getElementById('tracker-screen').style.display = 'none';
     document.getElementById('entry-error').textContent = '';
+    baseBounty = 0;
+    chipStates = {};
+    chaseInputs = {};
+    shownCount = 0;
     if(mode === 'nmg'){
       document.getElementById('category-screen').style.display = 'flex';
       document.getElementById('mode-tag').style.display = 'none';
+      screenName = 'category';
     } else {
       document.getElementById('entry-screen').style.display = 'flex';
+      screenName = 'entry';
     }
+    pushState();
   });
 
   document.getElementById('bounty-input').addEventListener('keydown', (e) => {
