@@ -328,7 +328,9 @@
 
   .load-more-wrap{
     display:flex;
-    justify-content:center;
+    flex-direction:column;
+    align-items:center;
+    gap:8px;
     padding:18px 0 8px;
   }
   #load-more-btn{
@@ -340,6 +342,18 @@
     border-radius:8px;
   }
   #load-more-btn:hover{border-color:var(--heat);color:var(--heat);}
+  #undo-btn{
+    background:var(--bg-card);
+    border:1.5px solid var(--radar);
+    color:var(--radar);
+    font-size:12px;
+    padding:9px 18px;
+    border-radius:8px;
+    letter-spacing:1px;
+    transition:all .15s ease;
+  }
+  #undo-btn:hover{background:var(--radar-dim);color:var(--text);}
+  #undo-btn:active{transform:scale(0.97);}
 
   /* Route Math — calculated minimum Chase Bounty targets, per scenario */
   .scenario-panel{
@@ -432,7 +446,7 @@
 <header>
   <h1><span>ROCKPORT</span> BOUNTY TRACKER</h1>
   <p>Need for Speed · Most Wanted (2005) — Blacklist Milestones</p>
-  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.1 · built by VROOMGUYx &amp; Claude</p>
+  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.2 · built by VROOMGUYx &amp; Claude</p>
   <div id="mode-tag" style="display:none;"></div>
   <div id="room-info" style="display:none;margin-top:10px;font-family:'Roboto Mono',monospace;font-size:12px;color:var(--muted);">
     Room <span id="room-code-display" class="mono" style="color:var(--gold);letter-spacing:2px;"></span>
@@ -481,6 +495,7 @@
     <button class="category-btn any" id="pick-any">
       <div class="cat-title">ANY%</div>
       <div class="cat-sub">Vic → Razor · 13 rivals</div>
+      <div class="cat-sub" style="margin-top:6px;font-size:10.5px;opacity:0.75;">Sonny &amp; Taz aren't listed — every milestone gets done anyway on this route, so nothing about them is ever unique.</div>
     </button>
     <button class="category-btn nmg" id="pick-nmg">
       <div class="cat-title">NMG</div>
@@ -516,6 +531,7 @@
     <div class="boss-list" id="boss-list"></div>
     <div class="load-more-wrap">
       <button id="load-more-btn">▼ Show Next 2 Rivals</button>
+      <button id="undo-btn" style="display:none;">↺ Undo Last Reveal</button>
     </div>
     <div class="done-msg" id="done-msg" style="display:none;">— Top of the Blacklist reached —</div>
   </div>
@@ -546,6 +562,7 @@
   let screenName = 'category';           // 'category' | 'entry' | 'tracker' — mirrors what's on screen
   let chipStates = {};                   // syncId -> bool, authoritative source for every chip
   let chaseInputs = {};                  // bossNum -> number, authoritative source for chase bounty inputs
+  let historyStack = [];                 // snapshots taken before each reveal, shared so "undo" agrees for both players
   let applyingRemote = false;            // guard so applying a remote snapshot doesn't re-trigger a write
   let pushTimer = null;
   const clientId = sessionStorage.getItem('bt-client-id')
@@ -586,6 +603,7 @@
       chips: {},
       chaseInputs: {},
       shownCount: 0,
+      history: [],
       updatedBy: clientId,
       updatedAt: Date.now()
     };
@@ -612,6 +630,7 @@
         chips: chipStates,
         chaseInputs: chaseInputs,
         shownCount: shownCount,
+        history: historyStack,
         updatedBy: clientId,
         updatedAt: Date.now()
       };
@@ -643,6 +662,7 @@
       baseBounty = remote.baseBounty || 0;
       chipStates = remote.chips || {};
       chaseInputs = remote.chaseInputs || {};
+      historyStack = remote.history || [];
       screenName = remote.screen || 'category';
       activeList = mode === 'nmg' ? allBosses : (mode === 'any' ? allBosses.filter(b => b.anyPercent) : []);
 
@@ -672,6 +692,7 @@
           }
         });
         updateTotalDisplay();
+        updateUndoUI();
       } else if(screenName === 'entry'){
         document.getElementById('entry-screen').style.display = 'flex';
         const input = document.getElementById('bounty-input');
@@ -1389,21 +1410,60 @@
     }
   }
 
+  function updateUndoUI(){
+    const btn = document.getElementById('undo-btn');
+    if(!btn) return;
+    btn.style.display = historyStack.length ? 'inline-block' : 'none';
+  }
+
+  // Snapshot taken right before a reveal, so "undo" can put everything —
+  // including any auto-toggled defaults or carried-over milestones that
+  // came along with that batch — back exactly how it was. Shared via
+  // historyStack (synced through pushState) so both players see the same
+  // undo, in the same order, regardless of who clicked reveal or undo.
+  function snapshotState(){
+    return {
+      shownCount,
+      chips: JSON.parse(JSON.stringify(chipStates)),
+      chaseInputs: JSON.parse(JSON.stringify(chaseInputs)),
+    };
+  }
+
+  function undoLastReveal(){
+    if(!historyStack.length) return;
+    const snap = historyStack.pop();
+    chipStates = snap.chips;
+    chaseInputs = snap.chaseInputs;
+    renderBossListUpTo(snap.shownCount);
+    document.querySelectorAll('.chase-input').forEach(el => {
+      el.value = chaseInputs[el.dataset.boss] || '';
+    });
+    updateTotalDisplay();
+    updateUndoUI();
+    pushState();
+  }
+
   function startTracking(){
+    historyStack = [];
     renderBossListUpTo(2);
     updateTotalDisplay();
+    updateUndoUI();
     pushState();
   }
 
   document.getElementById('load-more-btn').addEventListener('click', () => {
+    historyStack.push(snapshotState());
     const list = document.getElementById('boss-list');
     const nextEnd = Math.min(shownCount + 2, activeList.length);
     appendBosses(list, activeList.slice(shownCount, nextEnd));
     shownCount = nextEnd;
     updateTotalDisplay();
     updateLoadMoreUI();
+    updateUndoUI();
     pushState();
   });
+
+  document.getElementById('undo-btn').addEventListener('click', undoLastReveal);
 
   function chooseMode(chosen){
     mode = chosen;
@@ -1452,6 +1512,7 @@
     baseBounty = val;
     chipStates = {};
     chaseInputs = {};
+    historyStack = [];
     document.getElementById('entry-screen').style.display = 'none';
     document.getElementById('tracker-screen').style.display = 'block';
     screenName = 'tracker';
@@ -1464,7 +1525,9 @@
     baseBounty = 0;
     chipStates = {};
     chaseInputs = {};
+    historyStack = [];
     shownCount = 0;
+    updateUndoUI();
     if(mode === 'nmg'){
       document.getElementById('category-screen').style.display = 'flex';
       document.getElementById('mode-tag').style.display = 'none';
