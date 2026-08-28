@@ -446,7 +446,7 @@
 <header>
   <h1><span>ROCKPORT</span> BOUNTY TRACKER</h1>
   <p>Need for Speed · Most Wanted (2005) — Blacklist Milestones</p>
-  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.2 · built by VROOMGUYx &amp; Claude</p>
+  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.3 · built by VROOMGUYx &amp; Claude</p>
   <div id="mode-tag" style="display:none;"></div>
   <div id="room-info" style="display:none;margin-top:10px;font-family:'Roboto Mono',monospace;font-size:12px;color:var(--muted);">
     Room <span id="room-code-display" class="mono" style="color:var(--gold);letter-spacing:2px;"></span>
@@ -917,7 +917,7 @@
       cameras:[ {label:"180 mph cam",amount:76000,key:"jv-cam1",defaultOn:true}, {label:"164 mph cam",amount:76000,key:"jv-cam2",defaultOn:true}, {label:"152 mph cam",amount:76000} ] },
     { num:3, name:"Ronnie", car:"Aston Martin DB9", required:5550000, anyPercent:true, chaseInAnyPercent:false,
       milestones:[ {label:"32 tags",amount:140000,key:"ronnie-tags"}, {label:"600k bounty",amount:140000,key:"ronnie-m-600k",defaultOn:true}, {label:"under 2m chase",amount:140000,quick:true,key:"ronnie-quick"}, {label:"8m chase",amount:140000,key:"ronnie-longchase"} ],
-      cameras:[ {label:"139 mph cam",amount:94000,defaultOn:true}, {label:"158 mph cam",amount:94000}, {label:"177 mph cam",amount:94000} ] },
+      cameras:[ {label:"139 mph cam",amount:94000,key:"ronnie-cam1"}, {label:"158 mph cam",amount:94000}, {label:"177 mph cam",amount:94000} ] },
     { num:2, name:"Bull", car:"Mercedes-Benz SLR McLaren", required:7550000, anyPercent:true, chaseInAnyPercent:true, scenarioType:"bull",
       milestones:[ {label:"200k cost",amount:180000,defaultOn:true}, {label:"9m chase",amount:180000,key:"bull-longchase"}, {label:"12 roadblocks",amount:180000,key:"bull-roadblock"}, {label:"8 spike strips",amount:180000,defaultOn:true,key:"bull-spikes"} ],
       cameras:[ {label:"194 mph cam",amount:114000,defaultOn:true}, {label:"136 mph cam",amount:114000,defaultOn:true}, {label:"165 mph cam",amount:114000,defaultOn:true} ] },
@@ -1022,6 +1022,19 @@
       el.classList.add('active');
       chipStates[el.dataset.syncId] = true;
     }
+  }
+
+  // Ronnie's camera and 2-min quick escape are only actually completed once
+  // the player is on Razor's own pursuit — so they stay off on Ronnie's own
+  // card and only get carried over (auto-enabled) when Razor is revealed.
+  function enableRonnieCarryover(){
+    ['ronnie-cam1'].forEach(k => {
+      const el = document.querySelector(`.chip[data-key="${k}"]`);
+      if(el && !el.classList.contains('active')){
+        el.classList.add('active');
+        chipStates[el.dataset.syncId] = true;
+      }
+    });
   }
 
   // Completing a bigger milestone on a later rival auto-completes the
@@ -1161,13 +1174,13 @@
   // 850,000 from that one pursuit are the fixed, always-assumed pieces —
   // excluded from base and replayed here so nothing double-counts once
   // Razor's card actually renders.
-  const RAZOR_EXCLUDE_KEYS = ['razor-cam1','razor-cam2','razor-cam3','razor-m-850k'];
-  const RAZOR_FIXED = 136000*3 + 220000 + 850000; // 1,478,000
+  const RAZOR_EXCLUDE_KEYS = ['razor-cam1','razor-cam2','razor-cam3','razor-m-850k','razor-quick','ronnie-cam1','ronnie-quick'];
+  const RAZOR_FIXED = 136000*3 + 220000 + 850000 + 220000 + 94000 + 140000; // 1,932,000 — 3 Razor cams + 850k + raw 850k + Razor's 2min + Ronnie's carried-over cam + Ronnie's 2min
   function bullScenario(){
     const base = baseExcluding(RAZOR_EXCLUDE_KEYS);
     return {
       need: Math.max(0, 10000000 - base - RAZOR_FIXED),
-      target: 10000000 - RAZOR_FIXED, // 8,522,000 — total needed before the 850k pursuit
+      target: 10000000 - RAZOR_FIXED, // 8,068,000 — total needed before the 850k pursuit
     };
   }
 
@@ -1256,7 +1269,7 @@
     el.innerHTML = `
       <div class="scenario-title">Route Math — min. Chase Bounty needed</div>
       <div class="scenario-row"><span class="s-label">Before Razor's 850k pursuit (target $${fmt(s.target)})</span><span class="s-value">$${fmt(s.need)}</span></div>
-      <div class="scenario-hint">Assumes Razor's 3 cameras + the 850k milestone + the raw 850k itself.</div>
+      <div class="scenario-hint">Assumes Razor's 3 cameras + the 850k &amp; under-2min milestones + the raw 850k itself, plus Ronnie's camera &amp; under-2min — both only actually completed on Razor's own pursuit.</div>
       ${catchupNote}
     `;
   }
@@ -1357,6 +1370,7 @@
         bullCatchupNames = enableRemainingQuickEscapes();
         renderBullScenario(sPanel);
       } else if(boss.scenarioType === 'razor'){
+        enableRonnieCarryover();
         renderRazorScenario(sPanel);
       }
     }
