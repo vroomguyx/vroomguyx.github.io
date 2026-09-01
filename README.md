@@ -446,7 +446,7 @@
 <header>
   <h1><span>ROCKPORT</span> BOUNTY TRACKER</h1>
   <p>Need for Speed · Most Wanted (2005) — Blacklist Milestones</p>
-  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.3 · built by VROOMGUYx &amp; Claude</p>
+  <p style="margin-top:4px;font-size:10.5px;letter-spacing:1px;color:var(--muted);">v1.5 · built by VROOMGUYx &amp; Claude</p>
   <div id="mode-tag" style="display:none;"></div>
   <div id="room-info" style="display:none;margin-top:10px;font-family:'Roboto Mono',monospace;font-size:12px;color:var(--muted);">
     Room <span id="room-code-display" class="mono" style="color:var(--gold);letter-spacing:2px;"></span>
@@ -539,7 +539,7 @@
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-  import { getDatabase, ref, get, set, remove, onValue } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
+  import { getDatabase, ref, get, set, update, remove, onValue } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
   import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
   // --- Firebase setup ---------------------------------------------------
@@ -580,13 +580,65 @@
     return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
+  // The master override gets its own, deliberately SLOW hash (PBKDF2, salted,
+  // 150k rounds) instead of raw SHA-256. SHA-256 alone is built for speed —
+  // fine for the digest above where speed doesn't matter, but that also
+  // makes it cheap to brute-force offline once someone has the hash (and on
+  // a static page, they always can — view source). PBKDF2 with a high
+  // iteration count makes each guess meaningfully more expensive to try.
+  // This raises the cost of cracking it; it does not hide that the check
+  // exists, and it can't — that would need a server, which this app doesn't
+  // have. Treat the master password as a deterrent, not a real boundary.
+  async function deriveMasterHash(pw){
+    const salt = new TextEncoder().encode('rockport-bounty-tracker-master-salt-v1');
+    const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), {name:'PBKDF2'}, false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({name:'PBKDF2', salt, iterations: 150000, hash:'SHA-256'}, keyMaterial, 256);
+    return [...new Uint8Array(bits)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Room passwords are stored reversibly (AES-GCM) instead of hashed, so the
+  // app itself can decrypt and recover one later. The key below is derived
+  // from a fixed, hardcoded passphrase — same caveat as MASTER_PASSWORD_HASH
+  // below: this is client-side code, so the key is visible to anyone who
+  // reads the source. It stops a casual glance at the Firebase console from
+  // seeing a plaintext password sitting in the data; it does not stop
+  // someone who has this file.
+  let _appKeyPromise = null;
+  function getAppKey(){
+    if(!_appKeyPromise){
+      _appKeyPromise = crypto.subtle.digest('SHA-256', new TextEncoder().encode('rockport-bounty-tracker-room-key-v1'))
+        .then(material => crypto.subtle.importKey('raw', material, {name:'AES-GCM'}, false, ['encrypt','decrypt']));
+    }
+    return _appKeyPromise;
+  }
+  const toB64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const fromB64 = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+
+  async function encryptPassword(pw){
+    const key = await getAppKey();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, new TextEncoder().encode(pw));
+    return { iv: toB64(iv), ct: toB64(ct) };
+  }
+
+  async function decryptPassword(enc){
+    if(!enc || !enc.iv || !enc.ct) return null;
+    try{
+      const key = await getAppKey();
+      const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv: fromB64(enc.iv)}, key, fromB64(enc.ct));
+      return new TextDecoder().decode(pt);
+    } catch(e){
+      return null; // wrong/corrupt data — treat as "can't recover", not a crash
+    }
+  }
+
   // A hashed override that unlocks ANY room regardless of its own password.
   // The password itself is never stored here — only its SHA-256 hash — so
   // reading this file doesn't hand someone the plaintext outright. It's not
   // real protection though: this is client-side code, so anyone who opens
   // dev tools can see this hash and, given enough time, try to crack it.
   // It's only as safe as the password is long and random.
-  const MASTER_PASSWORD_HASH = 'a3cecae10d2c720c4509c7d2eaba363c156158cbe44cc1b51ec3225beaa3bc2a';
+  const MASTER_PASSWORD_HASH = '84c770a125470cea9b7780bf2785c4539842953cf3ddeeb4770bcfd73bd56b17'; // PBKDF2, not raw SHA-256 — see deriveMasterHash
 
   function genRoomCode(){
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // skips ambiguous chars like 0/O, 1/I
@@ -617,24 +669,25 @@
     el.style.color = status === 'live' ? '#5fd68a' : (status === 'error' ? 'var(--heat)' : 'var(--muted)');
   }
 
-  // Writes the current local state up to Firebase, debounced so rapid chip
-  // taps / typing don't spam the database. No-op outside multiplayer mode.
-  function pushState(){
+  // Writes ONLY the fields passed in, via Firebase's update() rather than
+  // set() — so one player's chip tap can't clobber another field (like
+  // shownCount) with a stale local copy. This was the cause of "reveal next
+  // 2, then it instantly reverts": every sync used to resend the WHOLE local
+  // state, so if player B's chip toggle (still holding an older shownCount
+  // locally) landed just after player A's reveal, B's write would silently
+  // roll shownCount back. Debounced + merged so rapid taps in a row become
+  // one write instead of several.
+  let pendingPatch = {};
+  function queueSync(patch){
     if(!multiplayer || !roomCode || applyingRemote) return;
+    Object.assign(pendingPatch, patch);
     clearTimeout(pushTimer);
     pushTimer = setTimeout(() => {
-      const state = {
-        screen: screenName,
-        mode: mode || '',
-        baseBounty: baseBounty,
-        chips: chipStates,
-        chaseInputs: chaseInputs,
-        shownCount: shownCount,
-        history: historyStack,
-        updatedBy: clientId,
-        updatedAt: Date.now()
-      };
-      set(ref(db, `rooms/${roomCode}/state`), state).catch(err => {
+      const toSend = pendingPatch;
+      pendingPatch = {};
+      toSend.updatedBy = clientId;
+      toSend.updatedAt = Date.now();
+      update(ref(db, `rooms/${roomCode}/state`), toSend).catch(err => {
         console.error('sync error', err);
         setConnStatus('error');
       });
@@ -656,6 +709,11 @@
   // out as a new write.
   function applyState(remote){
     if(!remote) return;
+    // Skip our own echo — Firebase always calls onValue for a write's own
+    // author too. We already applied this locally before sending it, so
+    // re-processing it here would just do a wasted full rebuild (or worse,
+    // race against whatever we've done locally since).
+    if(remote.updatedBy === clientId) return;
     applyingRemote = true;
     try{
       mode = (remote.mode === 'any' || remote.mode === 'nmg') ? remote.mode : null;
@@ -798,9 +856,9 @@
         }
         code = genRoomCode();
       }
-      const passwordHash = await hashPassword(pw);
+      const passwordEnc = await encryptPassword(pw);
       await set(ref(db, `rooms/${code}`), {
-        passwordHash,
+        passwordEnc,
         createdAt: Date.now(),
         state: defaultRoomState()
       });
@@ -842,8 +900,9 @@
         errEl.textContent = 'That room expired from inactivity. Ask your partner to create a new one.';
         return;
       }
-      const hash = await hashPassword(pw);
-      if(hash !== room.passwordHash && hash !== MASTER_PASSWORD_HASH){
+      const masterHash = await deriveMasterHash(pw);
+      const storedPw = await decryptPassword(room.passwordEnc);
+      if(pw !== storedPw && masterHash !== MASTER_PASSWORD_HASH){
         errEl.textContent = 'Incorrect password.';
         return;
       }
@@ -941,8 +1000,11 @@
     n = Math.round(n);
     const sign = n < 0 ? '-' : '';
     const abs = Math.abs(n);
-    if(abs >= 1000000) return sign + (Math.round(abs/10000)/100) + 'M';
-    if(abs >= 1000) return sign + (Math.round(abs/100)/10) + 'K';
+    // Precision to the nearest $1,000 for millions, $10 for thousands — extra
+    // digits only show up when a number actually needs them (JS drops
+    // trailing zeros on its own: 4.05 stays 4.05, 8.068 stays 8.068).
+    if(abs >= 1000000) return sign + (Math.round(abs/1000)/1000) + 'M';
+    if(abs >= 1000) return sign + (Math.round(abs/10)/100) + 'K';
     return sign + abs.toLocaleString('en-US');
   };
   function getChipBounty(){
@@ -994,7 +1056,7 @@
       const active = el.classList.toggle('active');
       chipStates[syncId] = active;
       updateTotalDisplay();
-      pushState();
+      queueSync({ [`chips/${syncId}`]: active });
     });
     return el;
   }
@@ -1052,16 +1114,16 @@
   function sweepChain(chain, fromKey){
     const idx = chain.indexOf(fromKey);
     if(idx < 0) return;
-    let changed = false;
+    const patch = {};
     for(let i=0;i<idx;i++){
       const el = document.querySelector(`.chip[data-key="${chain[i]}"]`);
       if(el && !el.classList.contains('active')){
         el.classList.add('active');
         chipStates[el.dataset.syncId] = true;
-        changed = true;
+        patch[`chips/${el.dataset.syncId}`] = true;
       }
     }
-    if(changed){ updateTotalDisplay(); pushState(); }
+    if(Object.keys(patch).length){ updateTotalDisplay(); queueSync(patch); }
   }
   function wireSweeps(mRow){
     SWEEP_CHAINS.forEach(chain => {
@@ -1401,7 +1463,7 @@
       const val = Number(input.value) || 0;
       chaseInputs[boss.num] = val;
       updateTotalDisplay();
-      pushState();
+      queueSync({ [`chaseInputs/${boss.num}`]: val });
     });
     return wrap;
   }
@@ -1433,7 +1495,7 @@
   // Snapshot taken right before a reveal, so "undo" can put everything —
   // including any auto-toggled defaults or carried-over milestones that
   // came along with that batch — back exactly how it was. Shared via
-  // historyStack (synced through pushState) so both players see the same
+  // historyStack (synced through queueSync) so both players see the same
   // undo, in the same order, regardless of who clicked reveal or undo.
   function snapshotState(){
     return {
@@ -1454,7 +1516,7 @@
     });
     updateTotalDisplay();
     updateUndoUI();
-    pushState();
+    queueSync({ shownCount, chips: chipStates, chaseInputs, history: historyStack });
   }
 
   function startTracking(){
@@ -1462,7 +1524,7 @@
     renderBossListUpTo(2);
     updateTotalDisplay();
     updateUndoUI();
-    pushState();
+    queueSync({ screen: screenName, mode: mode || '', baseBounty, shownCount, chips: chipStates, chaseInputs, history: historyStack });
   }
 
   document.getElementById('load-more-btn').addEventListener('click', () => {
@@ -1474,7 +1536,7 @@
     updateTotalDisplay();
     updateLoadMoreUI();
     updateUndoUI();
-    pushState();
+    queueSync({ shownCount, chips: chipStates, history: historyStack });
   });
 
   document.getElementById('undo-btn').addEventListener('click', undoLastReveal);
@@ -1499,7 +1561,7 @@
     } else {
       document.getElementById('entry-screen').style.display = 'flex';
       screenName = 'entry';
-      pushState();
+      queueSync({ screen: screenName, mode: mode || '' });
     }
   }
 
@@ -1511,7 +1573,7 @@
     document.getElementById('category-screen').style.display = 'flex';
     document.getElementById('mode-tag').style.display = 'none';
     screenName = 'category';
-    pushState();
+    queueSync({ screen: screenName });
   });
 
   document.getElementById('start-btn').addEventListener('click', () => {
@@ -1550,7 +1612,7 @@
       document.getElementById('entry-screen').style.display = 'flex';
       screenName = 'entry';
     }
-    pushState();
+    queueSync({ screen: screenName, baseBounty: 0, chips: {}, chaseInputs: {}, history: [], shownCount: 0 });
   });
 
   document.getElementById('bounty-input').addEventListener('keydown', (e) => {
